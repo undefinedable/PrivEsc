@@ -5,43 +5,134 @@
 
 ## Overview
 
-**PrivEsc** is a C++ privilege escalation utility for Windows x64 environments. It provides a minimal abstraction to transition execution context across Windows Integrity Levels:
+**PrivEsc** is a C++ privilege escalation utility for Windows x64 environments. It implements a staged execution model to transition process context across Windows Integrity Levels:
 
 * Execute a process as **Administrator** from a **standard user**
 * Execute a process as **NT AUTHORITY\SYSTEM** from an **Administrator**
 
-The implementation focuses on Windows internals, including token manipulation, privilege adjustment, and process creation using elevated security contexts.
+The implementation directly leverages Windows internals, including token inspection, privilege adjustment, registry manipulation, and primary token duplication.
 
 This project is an adapted implementation of `S12cybersecurity/PrivilegeEscalationClass`, maintained by **@undefinedable**.
 
 ---
 
-## Core Functionality
+## Architecture
 
-### 1. User → Administrator
+The core logic is implemented in `PrivEscalationClass`, responsible for:
 
-* Detects current Integrity Level using `TokenElevation`
-* Performs elevation to high integrity
-* Executes a specified binary with administrative privileges
-
----
-
-### 2. Administrator → NT AUTHORITY\SYSTEM
-
-* Enables `SeDebugPrivilege`
-* Enumerates active processes
-* Identifies processes running under `NT AUTHORITY\SYSTEM`
-* Extracts and duplicates their primary tokens
-* Spawns a new process using the duplicated SYSTEM token
+* Integrity Level evaluation using `TokenElevation`
+* Automatic privilege adjustment (`SeDebugPrivilege`)
+* Registry-based execution redirection
+* Process enumeration and SYSTEM token acquisition
+* Primary token duplication and process creation
 
 ---
 
-## Key Concepts
+## Privilege Escalation Flow
 
-* **Integrity Levels**: Determines execution context (User, High, SYSTEM)
-* **SeDebugPrivilege**: Required to access and duplicate tokens of privileged processes
-* **Primary Token Duplication**: Achieved via `DuplicateTokenEx`
-* **Process Creation with Token**: Implemented using `CreateProcessWithTokenW`
+### 1. Initial Context Evaluation
+
+* Queries current process token via `OpenProcessToken`
+* Uses `GetTokenInformation(TokenElevation)` to determine elevation state
+* Resolves current identity via token SID lookup
+
+---
+
+### 2. User → Administrator (High Integrity)
+
+* Writes to:
+
+  ```
+  HKCU\Software\Classes\ms-settings\Shell\Open\command
+  ```
+
+* Sets:
+
+  * Default value → target executable path
+  * `DelegateExecute` → empty string
+
+* Launches:
+
+  ```
+  C:\Windows\System32\fodhelper.exe
+  ```
+
+* Waits briefly for execution and removes registry keys via `RegDeleteKeyW`
+
+---
+
+### 3. Administrator → NT AUTHORITY\SYSTEM
+
+* Ensures `SeDebugPrivilege` is enabled via `AdjustTokenPrivileges`
+* Enumerates processes using `CreateToolhelp32Snapshot`
+* Identifies processes owned by `NT AUTHORITY\SYSTEM`
+* Retrieves access tokens using `OpenProcessToken`
+
+---
+
+### 4. Primary Token Duplication
+
+* Duplicates SYSTEM token:
+
+  ```
+  DuplicateTokenEx(..., TokenPrimary)
+  ```
+
+* Spawns target process:
+
+  ```
+  CreateProcessWithTokenW(...)
+  ```
+
+---
+
+## Key Components
+
+### `EnableDebugPrivilege()`
+
+* Enables `SeDebugPrivilege` on the current process token
+* Invoked during class construction and prior to SYSTEM escalation
+
+---
+
+### `runProcAsAdminFromUser(std::wstring procName)`
+
+* Implements registry-based execution redirection
+* Triggers execution via `fodhelper.exe`
+* Cleans registry artifacts post-execution
+
+---
+
+### `runProcAsSystemFromAdmin(std::wstring procName)`
+
+* Enumerates SYSTEM processes
+* Extracts and duplicates primary tokens
+* Executes target binary under SYSTEM context
+
+---
+
+### `SelfElevate()`
+
+* Retrieves current executable path
+* Re-launches itself through staged escalation:
+
+  * User → Administrator
+  * Administrator → SYSTEM
+* Terminates original process after successful transition
+
+---
+
+### `GetProcessUserName(DWORD pid)`
+
+* Resolves process owner using `TokenUser`
+* Converts SID to `DOMAIN\USERNAME` via `LookupAccountSidW`
+
+---
+
+### `createProcess(HANDLE token, LPCWSTR app)`
+
+* Creates a process using a duplicated primary token
+* Uses `CreateProcessWithTokenW`
 
 ---
 
@@ -50,7 +141,7 @@ This project is an adapted implementation of `S12cybersecurity/PrivilegeEscalati
 ### Build
 
 * Target: Windows x64
-* Link against:
+* Required libraries:
 
   * `advapi32.lib`
   * `user32.lib`
@@ -58,9 +149,9 @@ This project is an adapted implementation of `S12cybersecurity/PrivilegeEscalati
 
 ---
 
-### Run
+### Execution
 
-```
+```id="3o2q5k"
 PrivEsc.exe [optional_target_path]
 ```
 
@@ -74,23 +165,38 @@ PrivEsc.exe [optional_target_path]
 
 ## Behavior
 
-* Automatically determines current privilege level
-* Executes appropriate escalation path:
-
-  * User → Administrator
-  * Administrator → SYSTEM
-* Launches the target process under the highest achievable context
-* Optionally displays execution identity via `MessageBoxW`
+* Automatically enables `SeDebugPrivilege` during initialization
+* Determines execution path based on current Integrity Level
+* Supports staged self-relaunch via `SelfElevate()`
+* Cleans registry keys used during elevation
+* Executes target process under highest attainable context
+* Displays execution identity via `MessageBoxW`
 
 ---
 
-## Notes
+## Security Considerations
 
-> [!IMPORTANT]
-> SYSTEM execution depends on successful acquisition and duplication of a valid SYSTEM process token.
+* Requires write access to the current user registry hive
+* SYSTEM escalation depends on:
 
-> [!CAUTION]
-> Failure to enable `SeDebugPrivilege` will prevent access to privileged process tokens.
+  * Availability of accessible SYSTEM processes
+  * Successful privilege adjustment (`SeDebugPrivilege`)
+* Token access may be restricted in hardened environments
+
+---
+
+## Limitations
+
+* May fail in environments with:
+
+  * Restricted token access
+  * Process protection mechanisms
+  * Endpoint detection and response (EDR)
+
+* Assumes sufficient rights to:
+
+  * Query process tokens
+  * Adjust privileges
 
 ---
 
